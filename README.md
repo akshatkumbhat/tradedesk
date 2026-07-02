@@ -1,128 +1,130 @@
 # Tradedesk
 
-Local-first trading software. Python/FastAPI backend + React dashboard, connected to Alpaca (paper by default). Everything runs and stays on your machine — the only network calls are to your broker.
+**A local-first algorithmic trading platform.** Python strategy engine + broker-agnostic execution layer + an Apple-style React dashboard — all running on your own machine. The only network traffic is to your broker; your keys, trade history, and strategy code never leave localhost.
+
+![Backtest — SMA crossover on two years of AAPL](docs/screenshots/backtest.png)
+
+## Why this exists
+
+Retail algo-trading tools force a choice: hosted platforms that hold your API keys and strategy IP, or heavyweight open-source frameworks with no interface and a steep setup curve. Tradedesk takes a third path — **a private, single-user trading desk** with the ergonomics of a modern product: backtest an idea, promote it to paper trading, watch it execute live on a clean dashboard, and keep every byte of data in a local SQLite file.
+
+## Highlights
+
+| | |
+|---|---|
+| **Write once, run everywhere** | A strategy is a small Python class. The *same code* runs in backtests and live paper runs — no porting step between research and execution. |
+| **Honest backtesting** | Signal on bar close, fill at *next* bar's open. No lookahead bias. Stats: total return, CAGR, Sharpe, max drawdown, win rate, full trade log. |
+| **Concurrent strategies, one account** | Each run gets a cash allocation and tracks its own position slice, so multiple strategies trade a single brokerage account without interfering. |
+| **Risk engineering as a first-class feature** | Per-run max trade size, max daily loss (auto-flatten + halt), stop-loss/take-profit, a manual-approval queue for orders above a notional threshold, and a global kill switch. |
+| **Hot-pluggable strategies** | Drop a `.py` file into `strategies/` — it appears in the dashboard on refresh. Broken files are quarantined and surfaced with their error, never crashing the app. |
+| **Full audit trail** | Every order, alert, rail trip, and lifecycle event lands in an append-only activity log. You can always answer "what did the bot do, and why?" |
+
+## Screenshots
+
+| Live dashboard | Strategy management |
+|---|---|
+| ![Overview](docs/screenshots/overview.png) | ![Strategies](docs/screenshots/strategies.png) |
+
+![Live charts](docs/screenshots/chart.png)
+
+## Architecture
+
+```
+┌─────────────────────────────┐        ┌──────────────────────────────────────────┐
+│   React dashboard (Vite)    │        │            FastAPI backend               │
+│   localhost:5173            │  REST  │            localhost:8000                │
+│                             │──────▶ │                                          │
+│  Overview · Strategies ·    │   WS   │  ┌────────────┐  ┌───────────────────┐  │
+│  Chart · Backtest · Activity│◀────── │  │ Backtester │  │  StrategyRunner   │  │
+└─────────────────────────────┘        │  │ (bar replay)│  │ (async task/run,  │  │
+                                       │  └─────┬──────┘  │  risk rails)      │  │
+                                       │        │         └─────────┬─────────┘  │
+                                       │        ▼                   ▼            │
+                                       │  ┌──────────────────────────────────┐   │
+                                       │  │        Broker interface           │   │
+                                       │  └───────────────┬──────────────────┘   │
+                                       │                  │            SQLite    │
+                                       └──────────────────┼──────────────────────┘
+                                                          ▼
+                                                   Alpaca API (paper/live)
+```
+
+Key decisions and their rationale are documented in **[ARCHITECTURE.md](ARCHITECTURE.md)** — including the fill-semantics contract, the per-run allocation model, the approval-queue design, and the concurrency model.
+
+## Safety model
+
+Defense in depth, because software that can trade money should assume it will misbehave:
+
+1. **Paper by default, live triple-locked.** Live mode requires a *separate* live key pair in `.env`, plus typing `TRADE LIVE` into a confirmation dialog. No live keys → the mode switch is rejected server-side, full stop.
+2. **Graduated autonomy.** Every run has an *auto-approve threshold*: orders at or below it execute autonomously; anything larger queues for one-click human approval. Live runs default to approve-everything.
+3. **Hard limits enforced in the execution path**, not the strategy: notional caps per order, daily-loss auto-halt with position flatten, bar-close stop-loss/take-profit.
+4. **Kill switch.** One button stops every strategy and (optionally) flattens all positions at market.
+5. **Fail-safe process model.** Strategy exceptions are logged and retried next bar, never fatal. Runs orphaned by a crash are detected and marked stopped on restart. Schema migrations are idempotent.
 
 ## Quick start
 
-```sh
-# 1. keys (free): https://app.alpaca.markets -> Paper account -> API Keys
-cp .env.example .env            # paste keys in
+Requires Python 3.11+ ([uv](https://docs.astral.sh/uv/)) and Node 20+.
 
-# 2. backend (http://localhost:8000)
+```sh
+git clone https://github.com/akshatkumbhat/tradedesk && cd tradedesk
+
+# 1. Broker keys — free paper account at https://app.alpaca.markets
+cp .env.example .env                      # paste your paper keys in
+
+# 2. Backend
 uv run uvicorn backend.main:app --port 8000
 
-# 3. dashboard (http://localhost:5173)
-cd frontend && npm run dev
+# 3. Dashboard (second terminal)
+cd frontend && npm install && npm run dev # → http://localhost:5173
 ```
 
-Tests: `uv run pytest backend/tests`
+## Writing a strategy
 
-## System design
+```python
+from backend.engine.strategy import Context, Strategy
 
-```
-Browser (React dashboard) ── /api + /ws (localhost proxy) ──> FastAPI backend
-                                                                 │
-                                              ┌──────────────────┼────────────────┐
-                                        StrategyRunner      Backtester        SQLite
-                                        (async task/run)    (bar replay)   (runs, activity)
-                                                 │
-                                          Broker interface
-                                                 │
-                                          Alpaca adapter ──> Alpaca API (paper | live)
-```
+class Momentum(Strategy):
+    id = "my_momentum"
+    name = "Momentum"
+    params = {"lookback": 20, "enter_pct": 5.0}   # editable in the dashboard
 
-- **Broker abstraction** (`backend/broker/base.py`): all broker-specific code lives in one adapter class. Adding Binance/IBKR/Coinbase = one new file implementing `get_account / get_positions / get_bars / submit_order / get_orders`.
-- **One strategy API everywhere**: `on_bar(ctx)` sees history up to the current bar and calls `ctx.buy/sell/close`. Identical in backtests and live runs — a backtested strategy runs unmodified.
-- **Per-run allocation**: each running strategy gets its own cash slice and position tracking, so several strategies share one account without collisions.
-- **Fill semantics** (backtest): signal on close, fill at next bar's open, long-only, ~95%-of-cash default sizing. Live runs mirror this with market orders.
+    def __init__(self, **overrides):
+        super().__init__(**overrides)
+        self.warmup = int(self.p["lookback"]) + 1
 
-## Folder structure
-
-```
-tradedesk/
-├── backend/
-│   ├── main.py                  # FastAPI app: REST + /ws websocket
-│   ├── config.py                # .env loading; paper-mode default
-│   ├── store.py                 # SQLite: runs + activity log
-│   ├── broker/
-│   │   ├── base.py              # Broker ABC + Bar/Account/Position/Order models
-│   │   └── alpaca.py            # Alpaca adapter (IEX free data feed)
-│   ├── engine/
-│   │   ├── strategy.py          # Strategy base class + Context
-│   │   ├── backtest.py          # bar-replay backtester + stats
-│   │   ├── runner.py            # live runner: one async task per run
-│   │   ├── loader.py            # discovers user strategies in strategies/
-│   │   ├── registry.py          # built-ins + discovered, id-collision safe
-│   │   └── indicators.py        # SMA, RSI (Wilder)
-│   ├── builtin_strategies/      # SMA crossover, RSI mean-reversion
-│   └── tests/                   # 23 pytest tests
-├── strategies/                  # YOUR strategies — drop .py files here
-│   └── example_momentum.py      # commented template
-├── frontend/src/
-│   ├── App.tsx                  # layout + page switch + ws bootstrap
-│   ├── api.ts                   # typed API client
-│   ├── store.ts                 # zustand store + websocket client
-│   ├── components/              # Sidebar, Header, CandleChart, EquityChart…
-│   └── pages/                   # Overview, Strategies, Chart, Backtest, Activity
-├── .env                         # broker keys (gitignored, local only)
-└── tradedesk.db                 # SQLite (gitignored, local only)
+    def on_bar(self, ctx: Context) -> None:       # called once per closed bar
+        closes = ctx.history(int(self.p["lookback"]) + 1)["close"]
+        change = (closes.iloc[-1] / closes.iloc[0] - 1) * 100
+        if ctx.position == 0 and change > self.p["enter_pct"]:
+            ctx.buy()                              # fills next bar open / at market
+        elif ctx.position > 0 and change < 0:
+            ctx.close()
 ```
 
-## Database schema (SQLite, `tradedesk.db`)
+Save it in `strategies/`, refresh the dashboard, backtest it, then run it on paper — no other steps.
 
-```sql
-runs (                            -- one row per strategy run
-  id TEXT PK, strategy_id, symbol, timeframe,
-  params TEXT (json), allocation REAL,
-  status TEXT,                    -- running | stopped | error
-  error TEXT, mode TEXT,          -- paper | live
-  started_at, stopped_at,
-  cash REAL, position REAL, entry_price REAL,   -- the run's slice of the account
-  last_bar_time TEXT              -- idempotency: one evaluation per closed bar
-)
-activity (                        -- append-only audit log
-  id INTEGER PK, run_id, time, kind,   -- order | info | error
-  symbol, side, qty, price, status, mode, detail
-)
+## Testing
+
+```sh
+uv run pytest backend/tests   # 31 tests
 ```
 
-## API
+The suite favors **hand-computed fixtures over snapshots**: exact fill prices and P&L on known bar sequences, drawdown math verified against manual calculation, every risk rail exercised through a fake broker (order capping, approval queueing, daily-loss halt-and-flatten, SL/TP triggers, no-short invariants), plus strategy discovery/quarantine and crash-recovery paths. UI flows are verified with Playwright against the running app.
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | status, keys present, paper/live mode |
-| GET | `/api/account` | equity, cash, buying power |
-| GET | `/api/positions` | open positions w/ unrealized P&L |
-| GET | `/api/orders` | broker order history |
-| GET | `/api/bars/{symbol}` | OHLCV candles (`timeframe`, `start`, `end`, `limit`) |
-| GET | `/api/strategies` | built-in + discovered strategies (+ load errors) |
-| POST | `/api/backtest` | run a backtest → stats, equity curve, trades |
-| GET/POST | `/api/runs` | list / start a live run |
-| DELETE | `/api/runs/{id}` | stop a run |
-| GET | `/api/activity` | audit log |
-| WS | `/ws` | pushes account, positions, runs, activity every 5s |
+## Tech stack
 
-## GUI layout
+**Backend** — Python 3.11, FastAPI, pandas/NumPy, alpaca-py, SQLite (stdlib), pytest.
+**Frontend** — React 19 + TypeScript, Vite, Tailwind v4, TradingView lightweight-charts, zustand.
 
-Sidebar (Overview · Strategies · Chart · Backtest · Activity) + header with Paper/Live badge and backend-connection dot. Apple-style: `#f5f5f7` canvas, white rounded-2xl cards, SF system font, `#0071e3` accent, system green/red for P&L.
+## Current scope & roadmap
 
-- **Overview** — equity/cash/buying-power cards, positions table
-- **Strategies** — one card per strategy: params, symbol/timeframe/allocation, Start; active runs show live position + Stop
-- **Chart** — candlesticks + volume (lightweight-charts), symbol search, timeframe switch
-- **Backtest** — strategy/symbol/params → stat tiles (return, CAGR, Sharpe, max DD, win rate), equity curve, trade list
-- **Activity** — every order/info/error, paper vs live tagged
+Deliberately shipped small and verified end-to-end; the seams for growth are already in place:
 
-## Writing your own strategy
+- **More brokers/assets** — the `Broker` interface is the only Alpaca-aware surface; Binance (crypto) or IBKR are one adapter file each.
+- **Faster backtests** — indicators currently recompute per bar (O(n²)); incremental computation planned before minute-scale multi-year backtests.
+- **Broker-side brackets** — SL/TP is app-side per closed bar today; native bracket orders would survive machine sleep.
+- **Windows** — nothing platform-specific in the stack; needs a validation pass.
 
-Copy `strategies/example_momentum.py`, rename the class and `id`, edit `on_bar`. Refresh the browser — it appears on the Strategies page and in the Backtest picker. Broken files are skipped and the error shown in the UI.
+## License & disclaimer
 
-## Safety
-
-- **Paper by default.** Live mode requires separate live keys in `.env` AND typing `TRADE LIVE` in the dashboard. Without live keys, live mode cannot be enabled at all.
-- **Manual approval**: live runs queue every order for your one-click approval; raise "auto-approve under $X" per run to let small orders through autonomously. Paper runs are autonomous unless you set a threshold.
-- **Per-run rails** (all optional): max trade size ($ cap per order), max daily loss ($ — flattens and halts the run), stop-loss %, take-profit % (checked each closed bar).
-- **Emergency stop**: header "Stop All" halts every strategy, optionally selling all positions at market.
-- **Alerts**: rail trips, approvals, and halts pop as in-app toasts and land in the Activity log.
-- Keys live in `.env` on this machine only; all history is in a local SQLite file.
-
-Endpoints added by the safety layer: `POST /api/mode`, `POST /api/emergency-stop`, `POST /api/runs/{id}/pause|resume`, `GET /api/approvals`, `POST /api/approvals/{id}/approve|reject`.
+Personal project; no warranty. Nothing here is financial advice, and algorithmic trading involves substantial risk — the paper-first, approval-gated design exists for a reason.
