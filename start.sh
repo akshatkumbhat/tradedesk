@@ -31,7 +31,7 @@ trap cleanup EXIT INT TERM
 if port_busy $BACKEND_PORT; then
   echo "✓ Backend already running on :$BACKEND_PORT"
 else
-  echo "Starting backend on :$BACKEND_PORT…"
+  echo "Starting backend on :${BACKEND_PORT}..."
   ("$UV" run uvicorn backend.main:app --port $BACKEND_PORT >"$LOG_DIR/backend.log" 2>&1) &
   PIDS+=($!)
 fi
@@ -40,7 +40,7 @@ fi
 if port_busy $FRONTEND_PORT; then
   echo "✓ Dashboard already running on :$FRONTEND_PORT"
 else
-  echo "Starting dashboard on :$FRONTEND_PORT…"
+  echo "Starting dashboard on :${FRONTEND_PORT}..."
   (cd frontend && exec npm run dev >"../$LOG_DIR/frontend.log" 2>&1) &
   PIDS+=($!)
 fi
