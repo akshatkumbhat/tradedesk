@@ -127,4 +127,4 @@ Deliberately shipped small and verified end-to-end; the seams for growth are alr
 
 ## License & disclaimer
 
-Personal project; no warranty. Nothing here is financial advice, and algorithmic trading involves substantial risk — the paper-first, approval-gated design exists for a reason.
+[MIT](LICENSE). Nothing here is financial advice, and algorithmic trading involves substantial risk — the paper-first, approval-gated design exists for a reason.
