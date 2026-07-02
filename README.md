@@ -71,12 +71,19 @@ git clone https://github.com/akshatkumbhat/tradedesk && cd tradedesk
 # 1. Broker keys — free paper account at https://app.alpaca.markets
 cp .env.example .env                      # paste your paper keys in
 
-# 2. Backend
-uv run uvicorn backend.main:app --port 8000
-
-# 3. Dashboard (second terminal)
-cd frontend && npm install && npm run dev # → http://localhost:5173
+# 2. One-time install, then launch everything with one command
+uv sync && (cd frontend && npm install)
+./start.sh                                # → http://localhost:5173, Ctrl-C stops all
 ```
+
+<details>
+<summary>Manual start (two terminals)</summary>
+
+```sh
+uv run uvicorn backend.main:app --port 8000   # backend
+cd frontend && npm run dev                    # dashboard
+```
+</details>
 
 ## Writing a strategy
 
